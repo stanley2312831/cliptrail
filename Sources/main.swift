@@ -210,7 +210,6 @@ struct ContentView: View {
                         model.copyBack(item)
                     }
                     .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
-                    .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
                 }
                 .listStyle(.plain)
