@@ -302,7 +302,6 @@ final class AppModel: ObservableObject {
     <string>\(execPath)</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
 </dict>
 </plist>
 """
