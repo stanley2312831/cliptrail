@@ -266,7 +266,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.startWatching()
         setupStatusBar()
         setupHotkeyMonitor()
-        NSApp.activate(ignoringOtherApps: true)
+        showWindow()
+
+        // Fallback: some systems defer first window presentation; force once more.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.showWindow()
+        }
     }
 
     private func setupStatusBar() {
@@ -318,8 +323,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showWindow() {
         guard let window = window else { return }
-        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        window.orderFrontRegardless()
+        window.makeKey()
     }
 
     @objc private func refreshHistory() {
