@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.stanley.cliptrail</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/REPLACE_ME/.local/bin/cliptrail</string>
+    <string>watch</string>
+    <string>--interval</string>
+    <string>0.8</string>
+    <string>--max-items</string>
+    <string>500</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/cliptrail.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/cliptrail.err.log</string>
+</dict>
+</plist>

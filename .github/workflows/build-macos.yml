@@ -1,0 +1,33 @@
+name: build-macos
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show swift version
+        run: swift --version
+
+      - name: Build release
+        run: swift build -c release
+
+      - name: Package artifact
+        run: |
+          mkdir -p dist
+          cp .build/release/cliptrail dist/cliptrail
+          cp scripts/install.sh dist/install.sh
+          cp scripts/com.stanley.cliptrail.plist dist/com.stanley.cliptrail.plist
+          chmod +x dist/cliptrail dist/install.sh
+          cd dist && zip -r cliptrail-macos.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cliptrail-macos
+          path: dist/cliptrail-macos.zip
