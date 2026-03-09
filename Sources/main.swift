@@ -1,7 +1,6 @@
 import Foundation
 import AppKit
 import SwiftUI
-import ServiceManagement
 import Carbon.HIToolbox
 
 enum ClipKind: String, Codable {
@@ -136,7 +135,9 @@ final class AppModel: ObservableObject {
 
     init() {
         self.changeCount = pb.changeCount
-        self.launchAtLogin = UserDefaults.standard.bool(forKey: "launchAtLogin")
+        let launchAgent = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.stanley.cliptrail.plist").path
+        self.launchAtLogin = FileManager.default.fileExists(atPath: launchAgent)
         refresh()
     }
 
@@ -264,14 +265,75 @@ final class AppModel: ObservableObject {
 
     func toggleLaunchAtLogin(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: "launchAtLogin")
-        launchAtLogin = enabled
-        if #available(macOS 13.0, *) {
-            do {
-                if enabled { try SMAppService.mainApp.register() }
-                else { try SMAppService.mainApp.unregister() }
-            } catch {
-                NSLog("LaunchAtLogin update failed: \(error)")
+
+        do {
+            if enabled {
+                try installLaunchAgent()
+                launchAtLogin = true
+                showToast("已开启开机自启")
+            } else {
+                try removeLaunchAgent()
+                launchAtLogin = false
+                showToast("已关闭开机自启")
             }
+        } catch {
+            launchAtLogin = false
+            NSLog("LaunchAtLogin update failed: \(error)")
+            showToast("开机自启设置失败")
+        }
+    }
+
+    private func launchAgentPath() -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return home + "/Library/LaunchAgents/com.stanley.cliptrail.plist"
+    }
+
+    private func installLaunchAgent() throws {
+        let path = launchAgentPath()
+        let execPath = Bundle.main.executableURL?.path ?? "/Applications/ClipTrail.app/Contents/MacOS/ClipTrail"
+        let plist = """
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.stanley.cliptrail</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>\(execPath)</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+"""
+
+        let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try plist.write(toFile: path, atomically: true, encoding: .utf8)
+
+        _ = runLaunchctl(["unload", path])
+        _ = runLaunchctl(["load", path])
+    }
+
+    private func removeLaunchAgent() throws {
+        let path = launchAgentPath()
+        _ = runLaunchctl(["unload", path])
+        if FileManager.default.fileExists(atPath: path) {
+            try FileManager.default.removeItem(atPath: path)
+        }
+    }
+
+    @discardableResult
+    private func runLaunchctl(_ args: [String]) -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = args
+        do {
+            try p.run()
+            p.waitUntilExit()
+            return p.terminationStatus
+        } catch {
+            return -1
         }
     }
 
