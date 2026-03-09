@@ -1,82 +1,57 @@
 # ClipTrail (macOS)
 
-A practical clipboard history tool for macOS, built in Swift.
+一个真正可日用的 macOS 剪贴板历史软件（GUI + 常驻菜单栏 + 快捷键呼出）。
 
-## Features
+## 现在具备的体验
 
-- Continuously watches clipboard changes
-- Stores recent text clipboard history locally
-- Native GUI mode
-- **Global hotkey: Option + V** to show/hide window (Windows-like summon flow)
-- List recent items quickly
-- Copy any history item back to clipboard
-- Clear history
-- launchd template included for background auto-start
+- ✅ 原生 GUI（SwiftUI）
+- ✅ 菜单栏常驻（📋）
+- ✅ 全局快捷键：**Option + V** 呼出 / 隐藏窗口
+- ✅ 搜索历史记录
+- ✅ 一键复制回填
+- ✅ 开机自启开关（UI 内）
+- ✅ GitHub Actions 自动构建 macOS 产物
+- ✅ 提供 `.dmg` 可安装包
 
-## Commands
+## 使用方式（推荐）
 
-```bash
-cliptrail watch [--interval 0.8] [--max-items 500]
-cliptrail gui
-cliptrail list [--limit 30]
-cliptrail copy --index <n>
-cliptrail clear
-cliptrail status
-```
+1. 从 GitHub Actions 下载 `ClipTrail.dmg`
+2. 双击打开并拖入 Applications（若你愿意）
+3. 启动 ClipTrail
+4. 之后可用 `Option + V` 随时呼出
 
-## Build locally (macOS)
+## 功能说明
+
+- 软件持续监听文本剪贴板变化
+- 历史数据保存在：
+  `~/Library/Application Support/ClipTrail/history.json`
+- 在 GUI 界面中可：
+  - 搜索
+  - 刷新
+  - 清空
+  - 点击“复制”回填到系统剪贴板
+
+## 开机自启
+
+GUI 顶部有“开机自启”开关。打开后会尝试注册为登录项（macOS 13+）。
+
+## 开发与构建
 
 ```bash
 swift build -c release
-cp .build/release/cliptrail ./cliptrail
-./cliptrail status
+./.build/release/cliptrail gui
 ```
 
-## Install locally
+## CI 产物
 
-```bash
-./scripts/install.sh
-```
+Workflow 会上传：
+- `ClipTrail.dmg`
+- `ClipTrail.app`
+- `com.stanley.cliptrail.plist`
 
-## Run watcher (CLI mode)
-
-```bash
-~/.local/bin/cliptrail watch --interval 0.8 --max-items 500
-```
-
-## Run GUI mode
-
-```bash
-~/.local/bin/cliptrail gui
-```
-
-## launchd (optional)
-
-1. Edit `scripts/com.stanley.cliptrail.plist` and replace `/Users/REPLACE_ME` with your macOS username path.
-2. Copy plist to `~/Library/LaunchAgents/`
-3. Load it:
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.stanley.cliptrail.plist
-```
-
-Check status:
-
-```bash
-launchctl list | grep cliptrail
-```
-
-## GitHub Actions Build
-
-On every push to `main` (and manual dispatch), GitHub Actions builds on **macOS** and uploads artifact:
-
-- Artifact name: `cliptrail-macos`
-- Contains:
-  - `cliptrail` binary
-  - `install.sh`
-  - launchd plist template
-
-## Notes
-
-- Data path: `~/Library/Application Support/ClipTrail/history.json`
-- This tool stores text clipboard history only.
+---
+如果你需要下一步，我可以继续做：
+- 全局 Enter 回填 + Esc 关闭
+- 最近使用排序/置顶
+- 多类型内容支持（图片 / 文件）
+- 导入导出历史
