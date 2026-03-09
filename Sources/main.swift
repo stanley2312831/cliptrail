@@ -47,7 +47,6 @@ struct Store {
     }
 }
 
-@MainActor
 final class AppModel: ObservableObject {
     @Published var items: [ClipItem] = []
     @Published var query: String = ""
