@@ -46,8 +46,13 @@ jobs:
 
           cp scripts/com.stanley.cliptrail.plist dist/com.stanley.cliptrail.plist
 
+          # Prepare DMG staging folder (app + Applications shortcut)
+          mkdir -p dist/dmg
+          cp -R dist/ClipTrail.app dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+
           # Create DMG
-          hdiutil create -volname "ClipTrail" -srcfolder dist/ClipTrail.app -ov -format UDZO dist/ClipTrail.dmg
+          hdiutil create -volname "ClipTrail" -srcfolder dist/dmg -ov -format UDZO dist/ClipTrail.dmg
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
