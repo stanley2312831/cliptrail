@@ -60,6 +60,7 @@ Tips:
   - Keep watch running in background (or use launchd plist from scripts/)
   - Use `cliptrail copy --index 0` to put latest history item back to clipboard
   - Use `cliptrail gui` for desktop window mode
+  - In GUI mode, press Option+V globally to show/hide the window
 """)
 }
 
@@ -181,6 +182,8 @@ struct ContentView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
     let model = ClipboardModel()
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let root = ContentView(model: model)
@@ -200,10 +203,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
         model.startWatching()
+        setupHotkeyMonitor()
+    }
+
+    private func setupHotkeyMonitor() {
+        let handler: (NSEvent) -> Void = { [weak self] event in
+            guard let self = self else { return }
+            let isOptionV = event.modifierFlags.contains(.option) && event.charactersIgnoringModifiers?.lowercased() == "v"
+            if isOptionV {
+                self.toggleWindow()
+            }
+        }
+
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return event }
+            let isOptionV = event.modifierFlags.contains(.option) && event.charactersIgnoringModifiers?.lowercased() == "v"
+            if isOptionV {
+                self.toggleWindow()
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func toggleWindow() {
+        guard let window = window else { return }
+        if window.isVisible {
+            window.orderOut(nil)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         model.stopWatching()
+        if let g = globalMonitor { NSEvent.removeMonitor(g) }
+        if let l = localMonitor { NSEvent.removeMonitor(l) }
     }
 }
 

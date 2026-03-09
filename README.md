@@ -6,6 +6,8 @@ A practical clipboard history tool for macOS, built in Swift.
 
 - Continuously watches clipboard changes
 - Stores recent text clipboard history locally
+- Native GUI mode
+- **Global hotkey: Option + V** to show/hide window (Windows-like summon flow)
 - List recent items quickly
 - Copy any history item back to clipboard
 - Clear history
