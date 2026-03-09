@@ -31,14 +31,20 @@
 
 ## 功能说明
 
-- 软件持续监听文本剪贴板变化
+- 软件持续监听剪贴板变化（文本 / 图片 / 文件）
 - 历史数据保存在：
   `~/Library/Application Support/ClipTrail/history.json`
 - 在 GUI 界面中可：
   - 搜索
   - 刷新
   - 清空
-  - 点击“复制”回填到系统剪贴板
+  - 点击条目回填到系统剪贴板
+
+## 界面演示
+
+### 主界面（卡片历史 + 搜索）
+
+![ClipTrail 主界面](docs/images/demo-main.jpg)
 
 ## 开机自启
 
