@@ -20,6 +20,9 @@ jobs:
       - name: Build app bundle + DMG
         run: |
           set -e
+          APP_VERSION=$(cat VERSION 2>/dev/null || echo "1.0.0")
+          BUILD_VERSION=$(echo "$APP_VERSION" | awk -F. '{printf "%d%02d%02d", $1,$2,$3}')
+
           mkdir -p dist/ClipTrail.app/Contents/MacOS
           mkdir -p dist/ClipTrail.app/Contents/Resources
 
@@ -29,7 +32,7 @@ jobs:
           # Add a real app icon (fallback to macOS built-in icon from runner)
           cp /System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarCustomizeIcon.icns dist/ClipTrail.app/Contents/Resources/AppIcon.icns || true
 
-          cat > dist/ClipTrail.app/Contents/Info.plist << 'PLIST'
+          cat > dist/ClipTrail.app/Contents/Info.plist << PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -38,8 +41,8 @@ jobs:
             <key>CFBundleDisplayName</key><string>ClipTrail</string>
             <key>CFBundleExecutable</key><string>ClipTrail</string>
             <key>CFBundleIdentifier</key><string>com.stanley.cliptrail</string>
-            <key>CFBundleVersion</key><string>1</string>
-            <key>CFBundleShortVersionString</key><string>1.0.1</string>
+            <key>CFBundleVersion</key><string>${BUILD_VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>NSHighResolutionCapable</key><true/>
