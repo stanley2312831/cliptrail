@@ -16,9 +16,15 @@
 ## 使用方式（推荐）
 
 1. 从 GitHub Actions 下载 `ClipTrail.dmg`
-2. 双击打开并拖入 Applications（若你愿意）
+2. 双击打开并拖入 Applications
 3. 启动 ClipTrail
 4. 之后可用 `Option + V` 随时呼出
+
+> 如果 macOS 仍提示“已损坏/无法验证”，执行一次：
+>
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/ClipTrail.app
+> ```
 
 ## 功能说明
 
