@@ -530,6 +530,12 @@ struct ContentView: View {
                 Text("键盘：↑/↓ 选择，Enter 复制，Esc 关闭")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Spacer()
+                Button("退出软件") {
+                    NSApp.terminate(nil)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
             }
         }
         .padding(14)
