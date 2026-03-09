@@ -257,8 +257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.center()
         window.title = "ClipTrail"
         window.isReleasedWhenClosed = false
-        window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .moveToActiveSpace, .fullScreenAuxiliary]
+        window.level = .normal
+        window.collectionBehavior = [.canJoinAllSpaces, .moveToActiveSpace]
         window.contentViewController = hosting
         window.makeKeyAndOrderFront(nil)
 
@@ -275,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "打开 ClipTrail", action: #selector(showWindow), keyEquivalent: "o"))
+        menu.addItem(NSMenuItem(title: "重置窗口位置", action: #selector(resetWindowPosition), keyEquivalent: "0"))
         menu.addItem(NSMenuItem(title: "刷新历史", action: #selector(refreshHistory), keyEquivalent: "r"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
@@ -325,6 +326,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.refresh()
     }
 
+    @objc private func resetWindowPosition() {
+        guard let window = window else { return }
+        window.setFrame(NSRect(x: 0, y: 0, width: 560, height: 420), display: true)
+        window.center()
+        showWindow()
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
     }
@@ -336,6 +344,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             showWindow()
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
