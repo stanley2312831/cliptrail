@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import ServiceManagement
+import Carbon.HIToolbox
 
 struct ClipItem: Codable, Hashable {
     let text: String
@@ -187,13 +188,17 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
+                Text("若无效，请在 系统设置→隐私与安全性→辅助功能 中允许 ClipTrail")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
                 Text("点击“复制”即可回填")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .padding(14)
-        .frame(minWidth: 860, minHeight: 560)
+        .frame(minWidth: 620, minHeight: 480)
     }
 }
 
@@ -209,7 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hosting = NSHostingController(rootView: root)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 920, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -243,14 +248,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupHotkeyMonitor() {
         let handler: (NSEvent) -> Void = { [weak self] event in
             guard let self = self else { return }
-            let isOptionV = event.modifierFlags.contains(.option) && event.charactersIgnoringModifiers?.lowercased() == "v"
+            let isOptionV = event.modifierFlags.contains(.option) && event.keyCode == UInt16(kVK_ANSI_V)
             if isOptionV { self.toggleWindow() }
         }
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
-            let isOptionV = event.modifierFlags.contains(.option) && event.charactersIgnoringModifiers?.lowercased() == "v"
+            let isOptionV = event.modifierFlags.contains(.option) && event.keyCode == UInt16(kVK_ANSI_V)
             if isOptionV {
                 self.toggleWindow()
                 return nil
