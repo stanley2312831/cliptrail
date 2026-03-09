@@ -343,7 +343,7 @@ struct RowView: View {
 
     var body: some View {
         Button(action: onCopy) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text(item.timestamp, style: .time)
                         .font(.caption2)
@@ -355,9 +355,34 @@ struct RowView: View {
                         .padding(.vertical, 2)
                         .background(Color.accentColor.opacity(0.15), in: Capsule())
                 }
-                Text(item.preview)
-                    .lineLimit(3)
+
+                if item.kind == .image, let path = item.imagePath, let nsimg = NSImage(contentsOfFile: path) {
+                    Image(nsImage: nsimg)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxHeight: 96)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
+                if item.kind == .files, let filePaths = item.filePaths {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(filePaths.prefix(3)), id: \.self) { p in
+                            Text(URL(fileURLWithPath: p).lastPathComponent)
+                                .font(.subheadline)
+                                .lineLimit(1)
+                        }
+                        if filePaths.count > 3 {
+                            Text("+\(filePaths.count - 3) more")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(item.preview)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
