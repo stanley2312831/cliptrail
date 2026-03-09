@@ -236,9 +236,8 @@ struct ContentView: View {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private(set) var window: NSWindow?
     private var statusItem: NSStatusItem?
-    private var globalMonitor: Any?
+    private let popover = NSPopover()
     private var localMonitor: Any?
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
@@ -248,71 +247,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let root = ContentView(model: model)
         let hosting = NSHostingController(rootView: root)
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.center()
-        window.title = "ClipTrail"
-        window.isReleasedWhenClosed = false
-        window.level = .normal
-        window.collectionBehavior = [.canJoinAllSpaces, .moveToActiveSpace]
-        window.contentViewController = hosting
-        window.makeKeyAndOrderFront(nil)
+        popover.contentViewController = hosting
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentSize = NSSize(width: 560, height: 420)
 
-        self.window = window
         model.startWatching()
         setupStatusBar()
         setupHotkeyMonitor()
-        showWindow()
-
-        // Fallback: some systems defer first window presentation; force once more.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            self?.showWindow()
-        }
+        showPopover()
     }
 
     private func setupStatusBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.title = "📋"
+        statusItem?.button?.action = #selector(togglePopoverFromStatusItem)
+        statusItem?.button?.target = self
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "打开 ClipTrail", action: #selector(showWindow), keyEquivalent: "o"))
-        menu.addItem(NSMenuItem(title: "重置窗口位置", action: #selector(resetWindowPosition), keyEquivalent: "0"))
+        menu.addItem(NSMenuItem(title: "打开 ClipTrail", action: #selector(showPopover), keyEquivalent: "o"))
         menu.addItem(NSMenuItem(title: "刷新历史", action: #selector(refreshHistory), keyEquivalent: "r"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
-
         menu.items.forEach { $0.target = self }
-        statusItem?.menu = menu
+
+        // right-click menu
+        statusItem?.menu = nil
     }
 
     private func setupHotkeyMonitor() {
-        // Local fallback (works when app is focused)
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
             let isOptionV = event.modifierFlags.contains(.option) && event.keyCode == UInt16(kVK_ANSI_V)
             if isOptionV {
-                self.toggleWindow()
+                self.togglePopover()
                 return nil
             }
             return event
         }
 
-        // Global reliable registration via Carbon hotkey
-        var hotKeyID = EventHotKeyID(signature: OSType(0x4354524C), id: 1) // 'CTRL'
+        var hotKeyID = EventHotKeyID(signature: OSType(0x4354524C), id: 1)
         let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+
         let callback: EventHandlerUPP = { _, event, userData in
             guard let event = event, let userData = userData else { return noErr }
             var hkID = EventHotKeyID()
             let status = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hkID)
             if status == noErr, hkID.id == 1 {
                 let app = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
-                DispatchQueue.main.async { app.toggleWindow() }
+                DispatchQueue.main.async { app.togglePopover() }
             }
             return noErr
         }
@@ -321,45 +305,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
-    @objc private func showWindow() {
-        guard let window = window else { return }
+    @objc private func togglePopoverFromStatusItem() {
+        togglePopover()
+    }
+
+    private func togglePopover() {
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            showPopover()
+        }
+    }
+
+    @objc private func showPopover() {
+        guard let button = statusItem?.button else {
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        model.refresh()
         NSApp.activate(ignoringOtherApps: true)
-        window.orderFrontRegardless()
-        window.makeKey()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
     }
 
     @objc private func refreshHistory() {
         model.refresh()
     }
 
-    @objc private func resetWindowPosition() {
-        guard let window = window else { return }
-        window.setFrame(NSRect(x: 0, y: 0, width: 560, height: 420), display: true)
-        window.center()
-        showWindow()
-    }
-
     @objc private func quit() {
         NSApp.terminate(nil)
     }
 
-    private func toggleWindow() {
-        guard let window = window else { return }
-        if window.isVisible {
-            window.orderOut(nil)
-        } else {
-            showWindow()
-        }
-    }
-
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showWindow()
-        return true
-    }
-
     func applicationWillTerminate(_ notification: Notification) {
         model.stopWatching()
-        if let g = globalMonitor { NSEvent.removeMonitor(g) }
         if let l = localMonitor { NSEvent.removeMonitor(l) }
         if let hk = hotKeyRef { UnregisterEventHotKey(hk) }
         if let eh = eventHandlerRef { RemoveEventHandler(eh) }
@@ -369,7 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 func runGUI() {
     let app = NSApplication.shared
     let delegate = AppDelegate()
-    app.setActivationPolicy(.regular)
+    app.setActivationPolicy(.accessory)
     app.delegate = delegate
     app.run()
 }
