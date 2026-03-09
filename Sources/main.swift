@@ -57,6 +57,7 @@ final class AppModel: ObservableObject {
     private let pb = NSPasteboard.general
     private var timer: Timer?
     private var changeCount: Int
+    private var suppressNextOwnedCopyText: String?
 
     init() {
         self.changeCount = pb.changeCount
@@ -92,6 +93,7 @@ final class AppModel: ObservableObject {
     }
 
     func copyBack(_ item: ClipItem) {
+        suppressNextOwnedCopyText = item.text
         pb.clearContents()
         pb.setString(item.text, forType: .string)
     }
@@ -117,6 +119,10 @@ final class AppModel: ObservableObject {
         if pb.changeCount != changeCount {
             changeCount = pb.changeCount
             if let text = pb.string(forType: .string) {
+                if let owned = suppressNextOwnedCopyText, owned == text {
+                    suppressNextOwnedCopyText = nil
+                    return
+                }
                 store.append(text)
                 refresh()
             }
@@ -135,15 +141,17 @@ struct RowView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("复制") { onCopy() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+                Text("点击即复制")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             Text(item.text)
                 .lineLimit(3)
                 .textSelection(.enabled)
         }
         .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .onTapGesture { onCopy() }
     }
 }
 
@@ -192,7 +200,7 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("点击“复制”即可回填")
+                Text("点击任意历史项即可回填")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
