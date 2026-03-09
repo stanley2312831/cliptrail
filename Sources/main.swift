@@ -168,7 +168,8 @@ final class AppModel: ObservableObject {
 
     func refresh() {
         items = store.load()
-        if selectedId == nil { selectedId = filteredItems.first?.id }
+        // Do not auto-select first row to avoid random-looking blue highlight.
+        // Selection appears only after keyboard navigation.
     }
 
     func clear() {
