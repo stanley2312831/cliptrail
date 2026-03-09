@@ -52,6 +52,7 @@ final class AppModel: ObservableObject {
     @Published var items: [ClipItem] = []
     @Published var query: String = ""
     @Published var launchAtLogin: Bool = false
+    @Published var toastMessage: String?
 
     private let store = Store(maxItems: 800)
     private let pb = NSPasteboard.general
@@ -96,6 +97,7 @@ final class AppModel: ObservableObject {
         suppressNextOwnedCopyText = item.text
         pb.clearContents()
         pb.setString(item.text, forType: .string)
+        showToast("已复制到剪贴板")
     }
 
     func toggleLaunchAtLogin(_ enabled: Bool) {
@@ -111,6 +113,15 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 NSLog("LaunchAtLogin update failed: \(error)")
+            }
+        }
+    }
+
+    private func showToast(_ text: String) {
+        toastMessage = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            if self?.toastMessage == text {
+                self?.toastMessage = nil
             }
         }
     }
@@ -206,7 +217,19 @@ struct ContentView: View {
             }
         }
         .padding(14)
-        .frame(minWidth: 620, minHeight: 480)
+        .frame(minWidth: 500, minHeight: 380)
+        .overlay(alignment: .bottom) {
+            if let toast = model.toastMessage {
+                Text(toast)
+                    .font(.subheadline)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 8)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: model.toastMessage)
     }
 }
 
@@ -215,6 +238,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var globalMonitor: Any?
     private var localMonitor: Any?
+    private var hotKeyRef: EventHotKeyRef?
+    private var eventHandlerRef: EventHandlerRef?
     let model = AppModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -222,13 +247,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hosting = NSHostingController(rootView: root)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
+            styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.center()
         window.title = "ClipTrail"
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .moveToActiveSpace, .fullScreenAuxiliary]
         window.contentViewController = hosting
         window.makeKeyAndOrderFront(nil)
 
@@ -254,13 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupHotkeyMonitor() {
-        let handler: (NSEvent) -> Void = { [weak self] event in
-            guard let self = self else { return }
-            let isOptionV = event.modifierFlags.contains(.option) && event.keyCode == UInt16(kVK_ANSI_V)
-            if isOptionV { self.toggleWindow() }
-        }
-
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
+        // Local fallback (works when app is focused)
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
             let isOptionV = event.modifierFlags.contains(.option) && event.keyCode == UInt16(kVK_ANSI_V)
@@ -270,6 +292,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return event
         }
+
+        // Global reliable registration via Carbon hotkey
+        var hotKeyID = EventHotKeyID(signature: OSType(0x4354524C), id: 1) // 'CTRL'
+        let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let callback: EventHandlerUPP = { _, event, userData in
+            guard let event = event, let userData = userData else { return noErr }
+            var hkID = EventHotKeyID()
+            let status = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hkID)
+            if status == noErr, hkID.id == 1 {
+                let app = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+                DispatchQueue.main.async { app.toggleWindow() }
+            }
+            return noErr
+        }
+
+        InstallEventHandler(GetApplicationEventTarget(), callback, 1, &eventType, selfPtr, &eventHandlerRef)
+        RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
     @objc private func showWindow() {
@@ -299,6 +340,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.stopWatching()
         if let g = globalMonitor { NSEvent.removeMonitor(g) }
         if let l = localMonitor { NSEvent.removeMonitor(l) }
+        if let hk = hotKeyRef { UnregisterEventHotKey(hk) }
+        if let eh = eventHandlerRef { RemoveEventHandler(eh) }
     }
 }
 
