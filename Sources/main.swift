@@ -100,11 +100,21 @@ struct Store {
     }
 }
 
+struct UpdateInfo {
+    let version: String
+    let notes: String
+    let dmgUrl: URL
+    let releaseUrl: URL
+}
+
 final class AppModel: ObservableObject {
     @Published var items: [ClipItem] = []
     @Published var query: String = ""
     @Published var launchAtLogin: Bool = false
     @Published var toastMessage: String?
+    @Published var updateInfo: UpdateInfo?
+    @Published var checkingUpdate: Bool = false
+    @Published var updatingNow: Bool = false
 
     private let store = Store(maxItems: 800)
     private let pb = NSPasteboard.general
@@ -186,6 +196,88 @@ final class AppModel: ObservableObject {
                 NSLog("LaunchAtLogin update failed: \(error)")
             }
         }
+    }
+
+    func checkForUpdates() {
+        checkingUpdate = true
+
+        guard let url = URL(string: "https://api.github.com/repos/stanley2312831/cliptrail/releases/latest") else {
+            checkingUpdate = false
+            return
+        }
+
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let self = self else { return }
+            defer {
+                DispatchQueue.main.async { self.checkingUpdate = false }
+            }
+            guard let data = data else { return }
+
+            struct Asset: Decodable { let name: String; let browser_download_url: String }
+            struct Release: Decodable {
+                let tag_name: String
+                let body: String?
+                let html_url: String
+                let assets: [Asset]
+            }
+
+            guard let release = try? JSONDecoder().decode(Release.self, from: data) else { return }
+
+            let latest = release.tag_name.replacingOccurrences(of: "v", with: "")
+            let current = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
+            guard self.isVersion(latest, greaterThan: current) else { return }
+
+            guard let dmgAsset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }),
+                  let dmgUrl = URL(string: dmgAsset.browser_download_url),
+                  let releaseUrl = URL(string: release.html_url) else { return }
+
+            DispatchQueue.main.async {
+                self.updateInfo = UpdateInfo(
+                    version: latest,
+                    notes: release.body ?? "",
+                    dmgUrl: dmgUrl,
+                    releaseUrl: releaseUrl
+                )
+            }
+        }.resume()
+    }
+
+    func installUpdateInApp() {
+        guard let update = updateInfo else { return }
+        updatingNow = true
+
+        let tempDMG = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("ClipTrail-latest.dmg")
+        URLSession.shared.downloadTask(with: update.dmgUrl) { [weak self] localURL, _, _ in
+            guard let self = self else { return }
+            defer { DispatchQueue.main.async { self.updatingNow = false } }
+            guard let localURL = localURL else { return }
+            do {
+                if FileManager.default.fileExists(atPath: tempDMG.path) {
+                    try FileManager.default.removeItem(at: tempDMG)
+                }
+                try FileManager.default.copyItem(at: localURL, to: tempDMG)
+                DispatchQueue.main.async {
+                    NSWorkspace.shared.open(tempDMG)
+                    self.showToast("已下载更新，正在打开安装包")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.showToast("下载更新失败")
+                }
+            }
+        }.resume()
+    }
+
+    private func isVersion(_ a: String, greaterThan b: String) -> Bool {
+        let av = a.split(separator: ".").compactMap { Int($0) }
+        let bv = b.split(separator: ".").compactMap { Int($0) }
+        let n = max(av.count, bv.count)
+        for i in 0..<n {
+            let x = i < av.count ? av[i] : 0
+            let y = i < bv.count ? bv[i] : 0
+            if x != y { return x > y }
+        }
+        return false
     }
 
     private func showToast(_ text: String) {
@@ -292,6 +384,10 @@ struct ContentView: View {
                 Text("ClipTrail")
                     .font(.title2).bold()
                 Spacer()
+                Button(model.checkingUpdate ? "检查中..." : "检查更新") {
+                    model.checkForUpdates()
+                }
+                .disabled(model.checkingUpdate || model.updatingNow)
                 Toggle("开机自启", isOn: Binding(
                     get: { model.launchAtLogin },
                     set: { model.toggleLaunchAtLogin($0) }
@@ -300,6 +396,23 @@ struct ContentView: View {
                 .frame(width: 130)
                 Button("清空") { model.clear() }
                 Button("刷新") { model.refresh() }
+            }
+
+            if let up = model.updateInfo {
+                HStack(spacing: 8) {
+                    Text("发现新版本 v\(up.version)")
+                        .font(.subheadline).bold()
+                    Spacer()
+                    Button(model.updatingNow ? "下载中..." : "软件内更新") {
+                        model.installUpdateInApp()
+                    }
+                    .disabled(model.updatingNow)
+                    Button("发布页") {
+                        NSWorkspace.shared.open(up.releaseUrl)
+                    }
+                }
+                .padding(8)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
             }
 
             TextField("搜索剪贴板历史...", text: $model.query)
@@ -382,6 +495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusBar()
         setupHotkeyMonitor()
         showPopover()
+        model.checkForUpdates()
     }
 
     private func setupStatusBar() {
