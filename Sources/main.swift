@@ -4,13 +4,45 @@ import SwiftUI
 import ServiceManagement
 import Carbon.HIToolbox
 
-struct ClipItem: Codable, Hashable {
-    let text: String
+enum ClipKind: String, Codable {
+    case text
+    case image
+    case files
+}
+
+struct ClipItem: Codable, Hashable, Identifiable {
+    let id: UUID
+    let kind: ClipKind
+    let text: String?
+    let imagePath: String?
+    let filePaths: [String]?
     let timestamp: Date
+
+    var preview: String {
+        switch kind {
+        case .text:
+            return text ?? ""
+        case .image:
+            return "[图片]"
+        case .files:
+            let count = filePaths?.count ?? 0
+            return "[文件] \(count) 项"
+        }
+    }
+
+    var kindLabel: String {
+        switch kind {
+        case .text: return "文本"
+        case .image: return "图片"
+        case .files: return "文件"
+        }
+    }
 }
 
 struct Store {
+    let rootURL: URL
     let fileURL: URL
+    let imagesDir: URL
     let maxItems: Int
 
     init(maxItems: Int) {
@@ -19,7 +51,10 @@ struct Store {
         let appSupport = fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/ClipTrail", isDirectory: true)
         try? fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        self.rootURL = appSupport
         self.fileURL = appSupport.appendingPathComponent("history.json")
+        self.imagesDir = appSupport.appendingPathComponent("images", isDirectory: true)
+        try? fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
     }
 
     func load() -> [ClipItem] {
@@ -33,18 +68,35 @@ struct Store {
         }
     }
 
-    func append(_ text: String) {
-        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
+    func imageFileURL(for id: UUID) -> URL {
+        imagesDir.appendingPathComponent("\(id.uuidString).png")
+    }
+
+    func append(_ item: ClipItem) {
         var items = load()
-        if items.first?.text == clean { return }
-        items.insert(ClipItem(text: clean, timestamp: Date()), at: 0)
+        if let first = items.first, fingerprint(of: first) == fingerprint(of: item) {
+            return
+        }
+        items.insert(item, at: 0)
         if items.count > maxItems { items = Array(items.prefix(maxItems)) }
         save(items)
     }
 
     func clear() {
         save([])
+        try? FileManager.default.removeItem(at: imagesDir)
+        try? FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+    }
+
+    func fingerprint(of item: ClipItem) -> String {
+        switch item.kind {
+        case .text:
+            return "t:\(item.text ?? "")"
+        case .image:
+            return "i:\(item.imagePath ?? "")"
+        case .files:
+            return "f:\((item.filePaths ?? []).joined(separator: "|"))"
+        }
     }
 }
 
@@ -58,7 +110,7 @@ final class AppModel: ObservableObject {
     private let pb = NSPasteboard.general
     private var timer: Timer?
     private var changeCount: Int
-    private var suppressNextOwnedCopyText: String?
+    private var suppressNextOwnedFingerprint: String?
 
     init() {
         self.changeCount = pb.changeCount
@@ -69,7 +121,15 @@ final class AppModel: ObservableObject {
     var filteredItems: [ClipItem] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if q.isEmpty { return items }
-        return items.filter { $0.text.lowercased().contains(q) }
+        return items.filter { item in
+            if item.kind == .text {
+                return (item.text ?? "").lowercased().contains(q)
+            }
+            if item.kind == .files {
+                return (item.filePaths ?? []).joined(separator: " ").lowercased().contains(q)
+            }
+            return item.kindLabel.lowercased().contains(q)
+        }
     }
 
     func startWatching() {
@@ -94,9 +154,23 @@ final class AppModel: ObservableObject {
     }
 
     func copyBack(_ item: ClipItem) {
-        suppressNextOwnedCopyText = item.text
         pb.clearContents()
-        pb.setString(item.text, forType: .string)
+
+        switch item.kind {
+        case .text:
+            let value = item.text ?? ""
+            pb.setString(value, forType: .string)
+        case .image:
+            if let path = item.imagePath,
+               let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                pb.setData(data, forType: .png)
+            }
+        case .files:
+            let urls = (item.filePaths ?? []).map { URL(fileURLWithPath: $0) } as [NSURL]
+            pb.writeObjects(urls)
+        }
+
+        suppressNextOwnedFingerprint = store.fingerprint(of: item)
         showToast("已复制到剪贴板")
     }
 
@@ -106,11 +180,8 @@ final class AppModel: ObservableObject {
 
         if #available(macOS 13.0, *) {
             do {
-                if enabled {
-                    try SMAppService.mainApp.register()
-                } else {
-                    try SMAppService.mainApp.unregister()
-                }
+                if enabled { try SMAppService.mainApp.register() }
+                else { try SMAppService.mainApp.unregister() }
             } catch {
                 NSLog("LaunchAtLogin update failed: \(error)")
             }
@@ -120,24 +191,57 @@ final class AppModel: ObservableObject {
     private func showToast(_ text: String) {
         toastMessage = text
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            if self?.toastMessage == text {
-                self?.toastMessage = nil
-            }
+            if self?.toastMessage == text { self?.toastMessage = nil }
         }
     }
 
     private func pollClipboard() {
         if pb.changeCount != changeCount {
             changeCount = pb.changeCount
-            if let text = pb.string(forType: .string) {
-                if let owned = suppressNextOwnedCopyText, owned == text {
-                    suppressNextOwnedCopyText = nil
+            if let item = captureCurrentClipboard() {
+                let fp = store.fingerprint(of: item)
+                if let owned = suppressNextOwnedFingerprint, owned == fp {
+                    suppressNextOwnedFingerprint = nil
                     return
                 }
-                store.append(text)
+                store.append(item)
                 refresh()
             }
         }
+    }
+
+    private func captureCurrentClipboard() -> ClipItem? {
+        let id = UUID()
+
+        // 1) files
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !urls.isEmpty {
+            return ClipItem(id: id, kind: .files, text: nil, imagePath: nil, filePaths: urls.map { $0.path }, timestamp: Date())
+        }
+
+        // 2) image (prefer png)
+        if let pngData = pb.data(forType: .png), !pngData.isEmpty {
+            let out = store.imageFileURL(for: id)
+            try? pngData.write(to: out)
+            return ClipItem(id: id, kind: .image, text: nil, imagePath: out.path, filePaths: nil, timestamp: Date())
+        }
+
+        if let tiffData = pb.data(forType: .tiff),
+           let image = NSImage(data: tiffData),
+           let rep = NSBitmapImageRep(data: image.tiffRepresentation ?? Data()),
+           let png = rep.representation(using: .png, properties: [:]) {
+            let out = store.imageFileURL(for: id)
+            try? png.write(to: out)
+            return ClipItem(id: id, kind: .image, text: nil, imagePath: out.path, filePaths: nil, timestamp: Date())
+        }
+
+        // 3) text
+        if let text = pb.string(forType: .string) {
+            let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if clean.isEmpty { return nil }
+            return ClipItem(id: id, kind: .text, text: clean, imagePath: nil, filePaths: nil, timestamp: Date())
+        }
+
+        return nil
     }
 }
 
@@ -153,11 +257,13 @@ struct RowView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("点击即复制")
+                    Text(item.kindLabel)
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.15), in: Capsule())
                 }
-                Text(item.text)
+                Text(item.preview)
                     .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -205,14 +311,27 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             } else {
-                List(model.filteredItems, id: \.self) { item in
-                    RowView(item: item) {
-                        model.copyBack(item)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 8) {
+                            ForEach(model.filteredItems) { item in
+                                RowView(item: item) {
+                                    model.copyBack(item)
+                                }
+                                .id(item.id)
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
                     }
-                    .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
-                    .listRowBackground(Color.clear)
+                    .onChange(of: model.filteredItems.first?.id) { _ in
+                        if let first = model.filteredItems.first?.id {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                proxy.scrollTo(first, anchor: .top)
+                            }
+                        }
+                    }
                 }
-                .listStyle(.plain)
             }
 
             HStack {
@@ -220,11 +339,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("若无效，请在 系统设置→隐私与安全性→辅助功能 中允许 ClipTrail")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("点击任意历史项即可回填")
+                Text("支持文本 / 图片 / 文件")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -274,16 +389,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.title = "📋"
         statusItem?.button?.action = #selector(togglePopoverFromStatusItem)
         statusItem?.button?.target = self
-
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "打开 ClipTrail", action: #selector(showPopover), keyEquivalent: "o"))
-        menu.addItem(NSMenuItem(title: "刷新历史", action: #selector(refreshHistory), keyEquivalent: "r"))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
-        menu.items.forEach { $0.target = self }
-
-        // right-click menu
-        statusItem?.menu = nil
     }
 
     private func setupHotkeyMonitor() {
@@ -297,7 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
 
-        var hotKeyID = EventHotKeyID(signature: OSType(0x4354524C), id: 1)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4354524C), id: 1)
         let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
 
@@ -339,14 +444,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController?.view.window?.makeKey()
     }
 
-    @objc private func refreshHistory() {
-        model.refresh()
-    }
-
-    @objc private func quit() {
-        NSApp.terminate(nil)
-    }
-
     func applicationWillTerminate(_ notification: Notification) {
         model.stopWatching()
         if let l = localMonitor { NSEvent.removeMonitor(l) }
@@ -363,12 +460,9 @@ func runGUI() {
     app.run()
 }
 
-// App launch note:
-// Finder/Dock launches pass arguments like "-psn_0_12345".
-// So we should default to GUI for any non-explicit debug arg.
 let args = Array(CommandLine.arguments.dropFirst())
 if args.first == "--help" {
-    print("ClipTrail GUI app. Launch directly from Applications or run: cliptrail gui")
+    print("ClipTrail GUI app. Launch directly from Applications.")
 } else {
     runGUI()
 }
