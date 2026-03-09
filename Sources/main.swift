@@ -146,23 +146,25 @@ struct RowView: View {
     let onCopy: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(item.timestamp, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("点击即复制")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+        Button(action: onCopy) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(item.timestamp, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("点击即复制")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Text(item.text)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Text(item.text)
-                .lineLimit(3)
-                .textSelection(.enabled)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 6)
-        .contentShape(Rectangle())
-        .onTapGesture { onCopy() }
+        .buttonStyle(.plain)
     }
 }
 
