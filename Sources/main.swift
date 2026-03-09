@@ -374,10 +374,12 @@ func runGUI() {
     app.run()
 }
 
-// Keep CLI entry simple for users.
+// App launch note:
+// Finder/Dock launches pass arguments like "-psn_0_12345".
+// So we should default to GUI for any non-explicit debug arg.
 let args = Array(CommandLine.arguments.dropFirst())
-if args.first == "gui" || args.isEmpty {
-    runGUI()
+if args.first == "--help" {
+    print("ClipTrail GUI app. Launch directly from Applications or run: cliptrail gui")
 } else {
-    print("ClipTrail 现在主打 GUI。请直接运行: cliptrail gui")
+    runGUI()
 }
