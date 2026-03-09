@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 struct ClipItem: Codable {
     let text: String
@@ -49,6 +50,7 @@ ClipTrail - macOS clipboard history
 
 Usage:
   cliptrail watch [--interval 0.8] [--max-items 500]
+  cliptrail gui
   cliptrail list [--limit 30]
   cliptrail copy --index <n>
   cliptrail clear
@@ -57,6 +59,7 @@ Usage:
 Tips:
   - Keep watch running in background (or use launchd plist from scripts/)
   - Use `cliptrail copy --index 0` to put latest history item back to clipboard
+  - Use `cliptrail gui` for desktop window mode
 """)
 }
 
@@ -70,17 +73,8 @@ func parseInt(_ args: [String], _ flag: String, default value: Int) -> Int {
     return v
 }
 
-let args = Array(CommandLine.arguments.dropFirst())
-guard let cmd = args.first else {
-    usage(); exit(0)
-}
-
-switch cmd {
-case "watch":
-    let interval = parseDouble(args, "--interval", default: 0.8)
-    let maxItems = parseInt(args, "--max-items", default: 500)
+func runWatcher(interval: Double, maxItems: Int) {
     let store = Store(maxItems: maxItems)
-
     let pb = NSPasteboard.general
     var changeCount = pb.changeCount
     print("ClipTrail watcher started (interval: \(interval)s, max: \(maxItems))")
@@ -95,6 +89,143 @@ case "watch":
         }
         Thread.sleep(forTimeInterval: interval)
     }
+}
+
+final class ClipboardModel: ObservableObject {
+    @Published var items: [ClipItem] = []
+
+    private let store = Store(maxItems: 500)
+    private let pb = NSPasteboard.general
+    private var timer: Timer?
+    private var changeCount: Int
+
+    init() {
+        self.changeCount = pb.changeCount
+        refresh()
+    }
+
+    func startWatching() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
+            self?.pollClipboard()
+        }
+    }
+
+    func stopWatching() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func refresh() {
+        items = store.load()
+    }
+
+    func clear() {
+        store.clear()
+        refresh()
+    }
+
+    func copyBack(index: Int) {
+        guard index >= 0, index < items.count else { return }
+        pb.clearContents()
+        pb.setString(items[index].text, forType: .string)
+    }
+
+    private func pollClipboard() {
+        if pb.changeCount != changeCount {
+            changeCount = pb.changeCount
+            if let text = pb.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                store.append(text)
+                refresh()
+            }
+        }
+    }
+}
+
+struct ContentView: View {
+    @ObservedObject var model: ClipboardModel
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("ClipTrail")
+                    .font(.title2).bold()
+                Spacer()
+                Button("Refresh") { model.refresh() }
+                Button("Clear") { model.clear() }
+            }
+
+            List(Array(model.items.enumerated()), id: \.offset) { (idx, item) in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("#\(idx)").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Copy Back") { model.copyBack(index: idx) }
+                            .buttonStyle(.bordered)
+                    }
+                    Text(item.text)
+                        .font(.body)
+                        .lineLimit(3)
+                    Text(item.timestamp, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 700, minHeight: 460)
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var window: NSWindow?
+    let model = ClipboardModel()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let root = ContentView(model: model)
+        let hosting = NSHostingController(rootView: root)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 520),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.center()
+        window.title = "ClipTrail GUI"
+        window.contentViewController = hosting
+        window.makeKeyAndOrderFront(nil)
+
+        NSApp.activate(ignoringOtherApps: true)
+        self.window = window
+        model.startWatching()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        model.stopWatching()
+    }
+}
+
+func runGUI() {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.setActivationPolicy(.regular)
+    app.delegate = delegate
+    app.run()
+}
+
+let args = Array(CommandLine.arguments.dropFirst())
+guard let cmd = args.first else {
+    usage(); exit(0)
+}
+
+switch cmd {
+case "watch":
+    runWatcher(interval: parseDouble(args, "--interval", default: 0.8), maxItems: parseInt(args, "--max-items", default: 500))
+
+case "gui":
+    runGUI()
 
 case "list":
     let limit = parseInt(args, "--limit", default: 30)

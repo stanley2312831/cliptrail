@@ -15,6 +15,7 @@ A practical clipboard history tool for macOS, built in Swift.
 
 ```bash
 cliptrail watch [--interval 0.8] [--max-items 500]
+cliptrail gui
 cliptrail list [--limit 30]
 cliptrail copy --index <n>
 cliptrail clear
@@ -35,10 +36,16 @@ cp .build/release/cliptrail ./cliptrail
 ./scripts/install.sh
 ```
 
-## Run watcher
+## Run watcher (CLI mode)
 
 ```bash
 ~/.local/bin/cliptrail watch --interval 0.8 --max-items 500
+```
+
+## Run GUI mode
+
+```bash
+~/.local/bin/cliptrail gui
 ```
 
 ## launchd (optional)
