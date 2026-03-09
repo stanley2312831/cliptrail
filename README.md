@@ -65,9 +65,11 @@ Workflow 会上传：
 - `ClipTrail.app`
 - `com.stanley.cliptrail.plist`
 
----
-如果你需要下一步，我可以继续做：
-- 全局 Enter 回填 + Esc 关闭
-- 最近使用排序/置顶
-- 多类型内容支持（图片 / 文件）
-- 导入导出历史
+## 技术细节
+
+详细技术文档：
+- [docs/TECHNICAL.md](docs/TECHNICAL.md)
+
+## 署名
+
+Maintainer: **Telegram @STANLEY_LEGEND**
