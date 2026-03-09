@@ -17,6 +17,7 @@ struct ClipItem: Codable, Hashable, Identifiable {
     let imagePath: String?
     let filePaths: [String]?
     let timestamp: Date
+    var pinned: Bool
 
     var preview: String {
         switch kind {
@@ -45,7 +46,7 @@ struct Store {
     let imagesDir: URL
     let maxItems: Int
 
-    init(maxItems: Int) {
+    init(maxItems: Int = 1000) {
         self.maxItems = maxItems
         let fm = FileManager.default
         let appSupport = fm.homeDirectoryForCurrentUser
@@ -74,12 +75,25 @@ struct Store {
 
     func append(_ item: ClipItem) {
         var items = load()
-        if let first = items.first, fingerprint(of: first) == fingerprint(of: item) {
-            return
-        }
+        if let first = items.first, fingerprint(of: first) == fingerprint(of: item) { return }
         items.insert(item, at: 0)
-        if items.count > maxItems { items = Array(items.prefix(maxItems)) }
+        items = clamp(items)
         save(items)
+    }
+
+    func overwrite(_ items: [ClipItem]) {
+        save(clamp(items))
+    }
+
+    func clamp(_ items: [ClipItem]) -> [ClipItem] {
+        let pinned = items.filter { $0.pinned }
+        let normal = items.filter { !$0.pinned }
+        let allowNormal = max(0, maxItems - pinned.count)
+        let limited = pinned + Array(normal.prefix(allowNormal))
+        return limited.sorted { lhs, rhs in
+            if lhs.pinned != rhs.pinned { return lhs.pinned && !rhs.pinned }
+            return lhs.timestamp > rhs.timestamp
+        }
     }
 
     func clear() {
@@ -90,12 +104,9 @@ struct Store {
 
     func fingerprint(of item: ClipItem) -> String {
         switch item.kind {
-        case .text:
-            return "t:\(item.text ?? "")"
-        case .image:
-            return "i:\(item.imagePath ?? "")"
-        case .files:
-            return "f:\((item.filePaths ?? []).joined(separator: "|"))"
+        case .text: return "t:\(item.text ?? "")"
+        case .image: return "i:\(item.imagePath ?? "")"
+        case .files: return "f:\((item.filePaths ?? []).joined(separator: "|"))"
         }
     }
 }
@@ -115,8 +126,9 @@ final class AppModel: ObservableObject {
     @Published var updateInfo: UpdateInfo?
     @Published var checkingUpdate: Bool = false
     @Published var updatingNow: Bool = false
+    @Published var selectedId: UUID?
 
-    private let store = Store(maxItems: 800)
+    private let store = Store(maxItems: 1000)
     private let pb = NSPasteboard.general
     private var timer: Timer?
     private var changeCount: Int
@@ -129,15 +141,15 @@ final class AppModel: ObservableObject {
     }
 
     var filteredItems: [ClipItem] {
+        let sorted = items.sorted {
+            if $0.pinned != $1.pinned { return $0.pinned && !$1.pinned }
+            return $0.timestamp > $1.timestamp
+        }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if q.isEmpty { return items }
-        return items.filter { item in
-            if item.kind == .text {
-                return (item.text ?? "").lowercased().contains(q)
-            }
-            if item.kind == .files {
-                return (item.filePaths ?? []).joined(separator: " ").lowercased().contains(q)
-            }
+        if q.isEmpty { return sorted }
+        return sorted.filter { item in
+            if item.kind == .text { return (item.text ?? "").lowercased().contains(q) }
+            if item.kind == .files { return (item.filePaths ?? []).joined(separator: " ").lowercased().contains(q) }
             return item.kindLabel.lowercased().contains(q)
         }
     }
@@ -156,6 +168,7 @@ final class AppModel: ObservableObject {
 
     func refresh() {
         items = store.load()
+        if selectedId == nil { selectedId = filteredItems.first?.id }
     }
 
     func clear() {
@@ -165,29 +178,92 @@ final class AppModel: ObservableObject {
 
     func copyBack(_ item: ClipItem) {
         pb.clearContents()
-
         switch item.kind {
         case .text:
-            let value = item.text ?? ""
-            pb.setString(value, forType: .string)
+            pb.setString(item.text ?? "", forType: .string)
         case .image:
-            if let path = item.imagePath,
-               let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+            if let path = item.imagePath, let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
                 pb.setData(data, forType: .png)
             }
         case .files:
             let urls = (item.filePaths ?? []).map { URL(fileURLWithPath: $0) } as [NSURL]
             pb.writeObjects(urls)
         }
-
         suppressNextOwnedFingerprint = store.fingerprint(of: item)
         showToast("已复制到剪贴板")
+    }
+
+    func togglePin(_ item: ClipItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        items[idx].pinned.toggle()
+        store.overwrite(items)
+        refresh()
+    }
+
+    func selectNext() {
+        let list = filteredItems
+        guard !list.isEmpty else { return }
+        guard let current = selectedId, let idx = list.firstIndex(where: { $0.id == current }) else {
+            selectedId = list.first?.id; return
+        }
+        selectedId = list[min(idx + 1, list.count - 1)].id
+    }
+
+    func selectPrev() {
+        let list = filteredItems
+        guard !list.isEmpty else { return }
+        guard let current = selectedId, let idx = list.firstIndex(where: { $0.id == current }) else {
+            selectedId = list.first?.id; return
+        }
+        selectedId = list[max(idx - 1, 0)].id
+    }
+
+    func copySelected() {
+        guard let id = selectedId, let item = filteredItems.first(where: { $0.id == id }) else { return }
+        copyBack(item)
+    }
+
+    func exportJSON() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "cliptrail-history.json"
+        panel.allowedContentTypes = [.json]
+        if panel.runModal() == .OK, let url = panel.url {
+            let data = try? JSONEncoder().encode(items)
+            if let d = data, (try? d.write(to: url)) != nil {
+                showToast("导出成功")
+            } else {
+                showToast("导出失败")
+            }
+        }
+    }
+
+    func importJSON() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url,
+           let data = try? Data(contentsOf: url),
+           let incoming = try? JSONDecoder().decode([ClipItem].self, from: data) {
+            var merged = incoming + items
+            // dedupe by fingerprint
+            var seen = Set<String>()
+            merged = merged.filter {
+                let fp = store.fingerprint(of: $0)
+                if seen.contains(fp) { return false }
+                seen.insert(fp)
+                return true
+            }
+            store.overwrite(merged)
+            refresh()
+            showToast("导入成功")
+        } else {
+            showToast("导入取消/失败")
+        }
     }
 
     func toggleLaunchAtLogin(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: "launchAtLogin")
         launchAtLogin = enabled
-
         if #available(macOS 13.0, *) {
             do {
                 if enabled { try SMAppService.mainApp.register() }
@@ -200,44 +276,24 @@ final class AppModel: ObservableObject {
 
     func checkForUpdates() {
         checkingUpdate = true
-
         guard let url = URL(string: "https://api.github.com/repos/stanley2312831/cliptrail/releases/latest") else {
-            checkingUpdate = false
-            return
+            checkingUpdate = false; return
         }
-
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
             guard let self = self else { return }
-            defer {
-                DispatchQueue.main.async { self.checkingUpdate = false }
-            }
+            defer { DispatchQueue.main.async { self.checkingUpdate = false } }
             guard let data = data else { return }
-
             struct Asset: Decodable { let name: String; let browser_download_url: String }
-            struct Release: Decodable {
-                let tag_name: String
-                let body: String?
-                let html_url: String
-                let assets: [Asset]
-            }
-
+            struct Release: Decodable { let tag_name: String; let body: String?; let html_url: String; let assets: [Asset] }
             guard let release = try? JSONDecoder().decode(Release.self, from: data) else { return }
-
             let latest = release.tag_name.replacingOccurrences(of: "v", with: "")
             let current = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
             guard self.isVersion(latest, greaterThan: current) else { return }
-
             guard let dmgAsset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }),
                   let dmgUrl = URL(string: dmgAsset.browser_download_url),
                   let releaseUrl = URL(string: release.html_url) else { return }
-
             DispatchQueue.main.async {
-                self.updateInfo = UpdateInfo(
-                    version: latest,
-                    notes: release.body ?? "",
-                    dmgUrl: dmgUrl,
-                    releaseUrl: releaseUrl
-                )
+                self.updateInfo = UpdateInfo(version: latest, notes: release.body ?? "", dmgUrl: dmgUrl, releaseUrl: releaseUrl)
             }
         }.resume()
     }
@@ -245,25 +301,20 @@ final class AppModel: ObservableObject {
     func installUpdateInApp() {
         guard let update = updateInfo else { return }
         updatingNow = true
-
         let tempDMG = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("ClipTrail-latest.dmg")
         URLSession.shared.downloadTask(with: update.dmgUrl) { [weak self] localURL, _, _ in
             guard let self = self else { return }
             defer { DispatchQueue.main.async { self.updatingNow = false } }
             guard let localURL = localURL else { return }
             do {
-                if FileManager.default.fileExists(atPath: tempDMG.path) {
-                    try FileManager.default.removeItem(at: tempDMG)
-                }
+                if FileManager.default.fileExists(atPath: tempDMG.path) { try FileManager.default.removeItem(at: tempDMG) }
                 try FileManager.default.copyItem(at: localURL, to: tempDMG)
                 DispatchQueue.main.async {
                     NSWorkspace.shared.open(tempDMG)
                     self.showToast("已下载更新，正在打开安装包")
                 }
             } catch {
-                DispatchQueue.main.async {
-                    self.showToast("下载更新失败")
-                }
+                DispatchQueue.main.async { self.showToast("下载更新失败") }
             }
         }.resume()
     }
@@ -304,42 +355,36 @@ final class AppModel: ObservableObject {
 
     private func captureCurrentClipboard() -> ClipItem? {
         let id = UUID()
-
-        // 1) files
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !urls.isEmpty {
-            return ClipItem(id: id, kind: .files, text: nil, imagePath: nil, filePaths: urls.map { $0.path }, timestamp: Date())
+            return ClipItem(id: id, kind: .files, text: nil, imagePath: nil, filePaths: urls.map { $0.path }, timestamp: Date(), pinned: false)
         }
-
-        // 2) image (prefer png)
         if let pngData = pb.data(forType: .png), !pngData.isEmpty {
             let out = store.imageFileURL(for: id)
             try? pngData.write(to: out)
-            return ClipItem(id: id, kind: .image, text: nil, imagePath: out.path, filePaths: nil, timestamp: Date())
+            return ClipItem(id: id, kind: .image, text: nil, imagePath: out.path, filePaths: nil, timestamp: Date(), pinned: false)
         }
-
         if let tiffData = pb.data(forType: .tiff),
            let image = NSImage(data: tiffData),
            let rep = NSBitmapImageRep(data: image.tiffRepresentation ?? Data()),
            let png = rep.representation(using: .png, properties: [:]) {
             let out = store.imageFileURL(for: id)
             try? png.write(to: out)
-            return ClipItem(id: id, kind: .image, text: nil, imagePath: out.path, filePaths: nil, timestamp: Date())
+            return ClipItem(id: id, kind: .image, text: nil, imagePath: out.path, filePaths: nil, timestamp: Date(), pinned: false)
         }
-
-        // 3) text
         if let text = pb.string(forType: .string) {
             let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if clean.isEmpty { return nil }
-            return ClipItem(id: id, kind: .text, text: clean, imagePath: nil, filePaths: nil, timestamp: Date())
+            return ClipItem(id: id, kind: .text, text: clean, imagePath: nil, filePaths: nil, timestamp: Date(), pinned: false)
         }
-
         return nil
     }
 }
 
 struct RowView: View {
     let item: ClipItem
+    let selected: Bool
     let onCopy: () -> Void
+    let onPin: () -> Void
 
     var body: some View {
         Button(action: onCopy) {
@@ -349,6 +394,9 @@ struct RowView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Spacer()
+                    Button(item.pinned ? "取消置顶" : "置顶") { onPin() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
                     Text(item.kindLabel)
                         .font(.caption2)
                         .padding(.horizontal, 8)
@@ -388,11 +436,11 @@ struct RowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(selected ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1)
+                    .stroke(selected ? Color.accentColor : Color(nsColor: .separatorColor).opacity(0.6), lineWidth: selected ? 1.5 : 1)
             )
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
@@ -409,32 +457,24 @@ struct ContentView: View {
                 Text("ClipTrail")
                     .font(.title2).bold()
                 Spacer()
-                Button(model.checkingUpdate ? "检查中..." : "检查更新") {
-                    model.checkForUpdates()
-                }
-                .disabled(model.checkingUpdate || model.updatingNow)
-                Toggle("开机自启", isOn: Binding(
-                    get: { model.launchAtLogin },
-                    set: { model.toggleLaunchAtLogin($0) }
-                ))
-                .toggleStyle(.switch)
-                .frame(width: 130)
+                Button(model.checkingUpdate ? "检查中..." : "检查更新") { model.checkForUpdates() }
+                    .disabled(model.checkingUpdate || model.updatingNow)
+                Button("导出JSON") { model.exportJSON() }
+                Button("导入JSON") { model.importJSON() }
+                Toggle("开机自启", isOn: Binding(get: { model.launchAtLogin }, set: { model.toggleLaunchAtLogin($0) }))
+                    .toggleStyle(.switch)
+                    .frame(width: 130)
                 Button("清空") { model.clear() }
                 Button("刷新") { model.refresh() }
             }
 
             if let up = model.updateInfo {
                 HStack(spacing: 8) {
-                    Text("发现新版本 v\(up.version)")
-                        .font(.subheadline).bold()
+                    Text("发现新版本 v\(up.version)").font(.subheadline).bold()
                     Spacer()
-                    Button(model.updatingNow ? "下载中..." : "软件内更新") {
-                        model.installUpdateInApp()
-                    }
-                    .disabled(model.updatingNow)
-                    Button("发布页") {
-                        NSWorkspace.shared.open(up.releaseUrl)
-                    }
+                    Button(model.updatingNow ? "下载中..." : "软件内更新") { model.installUpdateInApp() }
+                        .disabled(model.updatingNow)
+                    Button("发布页") { NSWorkspace.shared.open(up.releaseUrl) }
                 }
                 .padding(8)
                 .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
@@ -453,10 +493,13 @@ struct ContentView: View {
                     ScrollView {
                         LazyVStack(spacing: 8) {
                             ForEach(model.filteredItems) { item in
-                                RowView(item: item) {
+                                RowView(item: item, selected: item.id == model.selectedId, onCopy: {
                                     model.copyBack(item)
-                                }
+                                }, onPin: {
+                                    model.togglePin(item)
+                                })
                                 .id(item.id)
+                                .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
                             }
                         }
                         .padding(.horizontal, 4)
@@ -469,6 +512,13 @@ struct ContentView: View {
                             }
                         }
                     }
+                    .onChange(of: model.selectedId) { id in
+                        if let id {
+                            withAnimation(.easeInOut(duration: 0.1)) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -477,7 +527,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("支持文本 / 图片 / 文件")
+                Text("键盘：↑/↓ 选择，Enter 复制，Esc 关闭")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -514,11 +564,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = hosting
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 560, height: 420)
+        popover.contentSize = NSSize(width: 640, height: 460)
 
         model.startWatching()
         setupStatusBar()
         setupHotkeyMonitor()
+        setupKeyboardMonitor()
         showPopover()
         model.checkForUpdates()
     }
@@ -530,17 +581,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.target = self
     }
 
-    private func setupHotkeyMonitor() {
+    private func setupKeyboardMonitor() {
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
-            let isOptionV = event.modifierFlags.contains(.option) && event.keyCode == UInt16(kVK_ANSI_V)
-            if isOptionV {
-                self.togglePopover()
-                return nil
+            switch event.keyCode {
+            case UInt16(kVK_DownArrow):
+                self.model.selectNext(); return nil
+            case UInt16(kVK_UpArrow):
+                self.model.selectPrev(); return nil
+            case UInt16(kVK_Return), UInt16(kVK_ANSI_KeypadEnter):
+                self.model.copySelected(); return nil
+            case UInt16(kVK_Escape):
+                self.popover.performClose(nil); return nil
+            default:
+                let isOptionV = event.modifierFlags.contains(.option) && event.keyCode == UInt16(kVK_ANSI_V)
+                if isOptionV {
+                    self.togglePopover(); return nil
+                }
+                return event
             }
-            return event
         }
+    }
 
+    private func setupHotkeyMonitor() {
         let hotKeyID = EventHotKeyID(signature: OSType(0x4354524C), id: 1)
         let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -560,16 +623,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
-    @objc private func togglePopoverFromStatusItem() {
-        togglePopover()
-    }
+    @objc private func togglePopoverFromStatusItem() { togglePopover() }
 
     private func togglePopover() {
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            showPopover()
-        }
+        if popover.isShown { popover.performClose(nil) }
+        else { showPopover() }
     }
 
     @objc private func showPopover() {
