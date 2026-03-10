@@ -2,7 +2,6 @@ import Foundation
 import AppKit
 import SwiftUI
 import Carbon.HIToolbox
-import Darwin
 
 enum ClipKind: String, Codable {
     case text
@@ -136,9 +135,8 @@ final class AppModel: ObservableObject {
 
     init() {
         self.changeCount = pb.changeCount
-        let launchAgent = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/com.stanley.cliptrail.plist").path
-        self.launchAtLogin = FileManager.default.fileExists(atPath: launchAgent)
+        self.launchAtLogin = false
+        self.launchAtLogin = detectLoginItemEnabled()
         refresh()
     }
 
@@ -265,15 +263,13 @@ final class AppModel: ObservableObject {
     }
 
     func toggleLaunchAtLogin(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: "launchAtLogin")
-
         do {
             if enabled {
-                try installLaunchAgent()
+                try addLoginItem()
                 launchAtLogin = true
                 showToast("已开启开机自启")
             } else {
-                try removeLaunchAgent()
+                try removeLoginItem()
                 launchAtLogin = false
                 showToast("已关闭开机自启")
             }
@@ -284,54 +280,53 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func launchAgentPath() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return home + "/Library/LaunchAgents/com.stanley.cliptrail.plist"
+    private func addLoginItem() throws {
+        let appPath = Bundle.main.bundleURL.path
+        // remove stale item first (idempotent)
+        _ = runAppleScript("tell application \"System Events\" to delete login item \"ClipTrail\"")
+        let script = "tell application \"System Events\" to make login item at end with properties {name:\"ClipTrail\", path:\"\(appPath)\", hidden:false}"
+        let status = runAppleScript(script)
+        if status != 0 { throw NSError(domain: "cliptrail.loginitem", code: Int(status)) }
     }
 
-    private func installLaunchAgent() throws {
-        let path = launchAgentPath()
-        let execPath = Bundle.main.executableURL?.path ?? "/Applications/ClipTrail.app/Contents/MacOS/ClipTrail"
-        let plist = """
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.stanley.cliptrail</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>\(execPath)</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><false/>
-</dict>
-</plist>
-"""
-
-        let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try plist.write(toFile: path, atomically: true, encoding: .utf8)
-
-        // hard reset old job definition (important when previous versions used KeepAlive)
-        _ = runLaunchctl(["bootout", "gui/\(getuid())/com.stanley.cliptrail"])
-        _ = runLaunchctl(["bootstrap", "gui/\(getuid())", path])
-        _ = runLaunchctl(["enable", "gui/\(getuid())/com.stanley.cliptrail"])
+    private func removeLoginItem() throws {
+        let status = runAppleScript("tell application \"System Events\" to delete login item \"ClipTrail\"")
+        // deleting non-existent item may fail; tolerate common not-found cases
+        if status != 0 {
+            NSLog("remove login item returned: \(status)")
+        }
     }
 
-    private func removeLaunchAgent() throws {
-        let path = launchAgentPath()
-        _ = runLaunchctl(["bootout", "gui/\(getuid())/com.stanley.cliptrail"])
-        _ = runLaunchctl(["disable", "gui/\(getuid())/com.stanley.cliptrail"])
-        if FileManager.default.fileExists(atPath: path) {
-            try FileManager.default.removeItem(atPath: path)
+    private func detectLoginItemEnabled() -> Bool {
+        // returns true/false via osascript output
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = [
+            "-e",
+            "tell application \"System Events\" to (name of login items) contains \"ClipTrail\""
+        ]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do {
+            try p.run()
+            p.waitUntilExit()
+            guard p.terminationStatus == 0 else { return false }
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return text == "true"
+        } catch {
+            return false
         }
     }
 
     @discardableResult
-    private func runLaunchctl(_ args: [String]) -> Int32 {
+    private func runAppleScript(_ script: String) -> Int32 {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        p.arguments = args
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", script]
+        p.standardOutput = Pipe()
+        p.standardError = Pipe()
         do {
             try p.run()
             p.waitUntilExit()
