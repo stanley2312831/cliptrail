@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import Carbon.HIToolbox
+import Darwin
 
 enum ClipKind: String, Codable {
     case text
@@ -302,6 +303,7 @@ final class AppModel: ObservableObject {
     <string>\(execPath)</string>
   </array>
   <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
 </dict>
 </plist>
 """
@@ -310,13 +312,16 @@ final class AppModel: ObservableObject {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try plist.write(toFile: path, atomically: true, encoding: .utf8)
 
-        _ = runLaunchctl(["unload", path])
-        _ = runLaunchctl(["load", path])
+        // hard reset old job definition (important when previous versions used KeepAlive)
+        _ = runLaunchctl(["bootout", "gui/\(getuid())/com.stanley.cliptrail"])
+        _ = runLaunchctl(["bootstrap", "gui/\(getuid())", path])
+        _ = runLaunchctl(["enable", "gui/\(getuid())/com.stanley.cliptrail"])
     }
 
     private func removeLaunchAgent() throws {
         let path = launchAgentPath()
-        _ = runLaunchctl(["unload", path])
+        _ = runLaunchctl(["bootout", "gui/\(getuid())/com.stanley.cliptrail"])
+        _ = runLaunchctl(["disable", "gui/\(getuid())/com.stanley.cliptrail"])
         if FileManager.default.fileExists(atPath: path) {
             try FileManager.default.removeItem(atPath: path)
         }
