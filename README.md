@@ -72,4 +72,4 @@ Workflow 会上传：
 
 ## 署名
 
-Maintainer: **Telegram @STANLEY_LEGEND**
+Maintainer: Stanley
