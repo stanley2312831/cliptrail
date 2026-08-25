@@ -4,6 +4,143 @@ import SwiftUI
 import Carbon.HIToolbox
 import CryptoKit
 import ImageIO
+import Darwin
+
+private let clipTrailActivateName = Notification.Name("com.stanley.cliptrail.activate")
+
+final class InstanceGuard {
+    static let shared = InstanceGuard()
+    private var lockFD: Int32 = -1
+    private var sockFD: Int32 = -1
+    private let bundleID = Bundle.main.bundleIdentifier ?? "com.stanley.cliptrail"
+
+    func tryBecomePrimary() -> Bool {
+        if !claimSocket() {
+            notifyExisting()
+            return false
+        }
+        if !claimFileLock() {
+            releaseSocket()
+            notifyExisting()
+            return false
+        }
+        reapDuplicates()
+        return true
+    }
+
+    private func socketPath() -> String {
+        "/tmp/com.stanley.cliptrail.\(getuid()).sock"
+    }
+
+    private func makeUnixAddr(_ path: String) -> sockaddr_un {
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        withUnsafeMutableBytes(of: &addr.sun_path) { raw in
+            path.withCString { src in
+                let n = min(strlen(src), raw.count - 1)
+                memcpy(raw.baseAddress, src, n)
+                raw.storeBytes(of: CChar(0), toByteOffset: n, as: CChar.self)
+            }
+        }
+        return addr
+    }
+
+    private func releaseSocket() {
+        if sockFD >= 0 {
+            close(sockFD)
+            sockFD = -1
+        }
+        unlink(socketPath())
+    }
+
+    private func connectUnix(_ path: String) -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = makeUnixAddr(path)
+        return withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sap in
+                connect(fd, sap, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+            }
+        }
+    }
+
+    private func bindUnix(_ fd: Int32, _ path: String) -> Bool {
+        var addr = makeUnixAddr(path)
+        return withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sap in
+                bind(fd, sap, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+            }
+        }
+    }
+
+    private func claimSocket() -> Bool {
+        let path = socketPath()
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+
+        if bindUnix(fd, path) {
+            _ = listen(fd, 1)
+            sockFD = fd
+            return true
+        }
+
+        // Name exists: live instance vs crashed leftover.
+        if connectUnix(path) {
+            close(fd)
+            return false
+        }
+        unlink(path)
+        if bindUnix(fd, path) {
+            _ = listen(fd, 1)
+            sockFD = fd
+            return true
+        }
+        close(fd)
+        return false
+    }
+
+    private func claimFileLock() -> Bool {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ClipTrail", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("instance.lock").path
+        let fd = open(path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else { return false }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            close(fd)
+            return false
+        }
+        lockFD = fd
+        ftruncate(fd, 0)
+        var pid = getpid()
+        _ = withUnsafeBytes(of: &pid) { raw in
+            write(fd, raw.baseAddress, raw.count)
+        }
+        return true
+    }
+
+    private func reapDuplicates() {
+        let me = getpid()
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        where app.processIdentifier != me {
+            app.forceTerminate()
+        }
+    }
+
+    private func notifyExisting() {
+        DistributedNotificationCenter.default().postNotificationName(
+            clipTrailActivateName,
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .first { $0.processIdentifier != getpid() }?
+            .activate(options: [.activateIgnoringOtherApps])
+    }
+}
 
 private func sha256Hex(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -768,6 +905,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.animates = true
         popover.contentSize = NSSize(width: 640, height: 460)
 
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(handleActivatePing),
+            name: clipTrailActivateName,
+            object: nil
+        )
+
         model.startWatching(interval: 1.2)
         setupStatusBar()
         setupHotkeyMonitor()
@@ -826,6 +970,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
+    @objc private func handleActivatePing() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.model.startWatching(interval: 0.4)
+            self.showPopover()
+        }
+    }
+
     @objc private func togglePopoverFromStatusItem() { togglePopover() }
 
     private func togglePopover() {
@@ -849,6 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        DistributedNotificationCenter.default().removeObserver(self)
         model.stopWatching()
         if let l = localMonitor { NSEvent.removeMonitor(l) }
         if let hk = hotKeyRef { UnregisterEventHotKey(hk) }
@@ -857,6 +1010,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 func runGUI() {
+    guard InstanceGuard.shared.tryBecomePrimary() else {
+        Thread.sleep(forTimeInterval: 0.05)
+        return
+    }
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.setActivationPolicy(.accessory)
