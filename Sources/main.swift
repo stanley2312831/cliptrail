@@ -2,6 +2,71 @@ import Foundation
 import AppKit
 import SwiftUI
 import Carbon.HIToolbox
+import CryptoKit
+import ImageIO
+
+private func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+private func downsamplePNG(_ data: Data, maxEdge: CGFloat = 1600) -> Data? {
+    guard let image = NSImage(data: data) else { return nil }
+    let pixel = image.representations.first.map {
+        CGSize(width: $0.pixelsWide, height: $0.pixelsHigh)
+    } ?? image.size
+    let longest = max(pixel.width, pixel.height)
+    let target: NSSize
+    if longest > maxEdge && longest > 0 {
+        let scale = maxEdge / longest
+        target = NSSize(width: max(1, pixel.width * scale), height: max(1, pixel.height * scale))
+    } else {
+        target = pixel
+    }
+    let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: Int(target.width),
+        pixelsHigh: Int(target.height),
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    )
+    guard let rep else { return nil }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    image.draw(in: NSRect(origin: .zero, size: target), from: .zero, operation: .copy, fraction: 1)
+    NSGraphicsContext.restoreGraphicsState()
+    return rep.representation(using: .png, properties: [.compressionFactor: 0.75])
+}
+
+final class ThumbCache {
+    static let shared = ThumbCache()
+    private let cache = NSCache<NSString, NSImage>()
+
+    private init() {
+        cache.countLimit = 80
+    }
+
+    func thumbnail(path: String, maxPixel: CGFloat) -> NSImage? {
+        let key = "\(path)|\(Int(maxPixel))" as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        let url = URL(fileURLWithPath: path) as CFURL
+        guard let src = CGImageSourceCreateWithURL(url, nil) else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        cache.setObject(img, forKey: key)
+        return img
+    }
+}
 
 enum ClipKind: String, Codable {
     case text
@@ -63,21 +128,32 @@ struct Store {
     }
 
     func save(_ items: [ClipItem]) {
-        if let data = try? JSONEncoder().encode(items) {
-            try? data.write(to: fileURL)
+        let payload = clamp(items)
+        if let data = try? JSONEncoder().encode(payload) {
+            try? data.write(to: fileURL, options: .atomic)
         }
+        pruneOrphans(referenced: payload)
     }
 
-    func imageFileURL(for id: UUID) -> URL {
-        imagesDir.appendingPathComponent("\(id.uuidString).png")
+    func writeImageData(_ data: Data) -> String? {
+        let png = downsamplePNG(data) ?? data
+        let hex = sha256Hex(png)
+        let url = imagesDir.appendingPathComponent("\(hex).png")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? png.write(to: url, options: .atomic)
+        }
+        return url.path
     }
 
-    func append(_ item: ClipItem) {
-        var items = load()
-        if let first = items.first, fingerprint(of: first) == fingerprint(of: item) { return }
-        items.insert(item, at: 0)
-        items = clamp(items)
-        save(items)
+    func pruneOrphans(referenced items: [ClipItem]) {
+        let keep = Set(items.compactMap(\.imagePath))
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: imagesDir,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for url in files where !keep.contains(url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     func overwrite(_ items: [ClipItem]) {
@@ -103,9 +179,14 @@ struct Store {
 
     func fingerprint(of item: ClipItem) -> String {
         switch item.kind {
-        case .text: return "t:\(item.text ?? "")"
-        case .image: return "i:\(item.imagePath ?? "")"
-        case .files: return "f:\((item.filePaths ?? []).joined(separator: "|"))"
+        case .text:
+            let t = item.text ?? ""
+            if t.utf8.count < 2048 { return "t:\(t)" }
+            return "t#\(t.utf8.count)#\(sha256Hex(Data(t.utf8)))"
+        case .image:
+            return "i:\(item.imagePath ?? "")"
+        case .files:
+            return "f:\((item.filePaths ?? []).joined(separator: "|"))"
         }
     }
 }
@@ -132,33 +213,38 @@ final class AppModel: ObservableObject {
     private var timer: Timer?
     private var changeCount: Int
     private var suppressNextOwnedFingerprint: String?
+    private var saveWork: DispatchWorkItem?
+    private let ioQueue = DispatchQueue(label: "com.stanley.cliptrail.io", qos: .utility)
 
     init() {
         self.changeCount = pb.changeCount
         self.launchAtLogin = false
         self.launchAtLogin = detectLoginItemEnabled()
-        refresh()
+        items = store.load()
+        ioQueue.async { [store] in
+            store.pruneOrphans(referenced: store.load())
+        }
     }
 
     var filteredItems: [ClipItem] {
-        let sorted = items.sorted {
-            if $0.pinned != $1.pinned { return $0.pinned && !$1.pinned }
-            return $0.timestamp > $1.timestamp
-        }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if q.isEmpty { return sorted }
-        return sorted.filter { item in
+        let base = items
+        if q.isEmpty { return base }
+        return base.filter { item in
             if item.kind == .text { return (item.text ?? "").lowercased().contains(q) }
             if item.kind == .files { return (item.filePaths ?? []).joined(separator: " ").lowercased().contains(q) }
             return item.kindLabel.lowercased().contains(q)
         }
     }
 
-    func startWatching() {
+    func startWatching(interval: TimeInterval = 1.2) {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.pollClipboard()
         }
+        t.tolerance = max(0.2, interval * 0.4)
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     func stopWatching() {
@@ -168,8 +254,41 @@ final class AppModel: ObservableObject {
 
     func refresh() {
         items = store.load()
-        // Do not auto-select first row to avoid random-looking blue highlight.
-        // Selection appears only after keyboard navigation.
+    }
+
+    private func persistSoon() {
+        saveWork?.cancel()
+        let snapshot = items
+        let work = DispatchWorkItem { [store] in
+            store.save(snapshot)
+        }
+        saveWork = work
+        ioQueue.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    private func ingest(_ item: ClipItem) {
+        if let first = items.first, store.fingerprint(of: first) == store.fingerprint(of: item) {
+            return
+        }
+        if let idx = items.firstIndex(where: { store.fingerprint(of: $0) == store.fingerprint(of: item) }) {
+            let moved = items.remove(at: idx)
+            items.insert(
+                ClipItem(
+                    id: moved.id,
+                    kind: moved.kind,
+                    text: moved.text,
+                    imagePath: moved.imagePath,
+                    filePaths: moved.filePaths,
+                    timestamp: Date(),
+                    pinned: moved.pinned
+                ),
+                at: 0
+            )
+        } else {
+            items.insert(item, at: 0)
+        }
+        items = store.clamp(items)
+        persistSoon()
     }
 
     func clear() {
@@ -197,8 +316,8 @@ final class AppModel: ObservableObject {
     func togglePin(_ item: ClipItem) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[idx].pinned.toggle()
-        store.overwrite(items)
-        refresh()
+        items = store.clamp(items)
+        persistSoon()
     }
 
     func selectNext() {
@@ -401,39 +520,54 @@ final class AppModel: ObservableObject {
     }
 
     private func pollClipboard() {
-        if pb.changeCount != changeCount {
-            changeCount = pb.changeCount
-            if let item = captureCurrentClipboard() {
-                let fp = store.fingerprint(of: item)
-                if let owned = suppressNextOwnedFingerprint, owned == fp {
-                    suppressNextOwnedFingerprint = nil
+        guard pb.changeCount != changeCount else { return }
+        changeCount = pb.changeCount
+        guard let snapshot = snapshotPasteboard() else { return }
+        ioQueue.async { [weak self] in
+            guard let self, let item = self.buildItem(from: snapshot) else { return }
+            DispatchQueue.main.async {
+                let fp = self.store.fingerprint(of: item)
+                if let owned = self.suppressNextOwnedFingerprint, owned == fp {
+                    self.suppressNextOwnedFingerprint = nil
                     return
                 }
-                store.append(item)
-                refresh()
+                self.ingest(item)
             }
         }
     }
 
-    private func captureCurrentClipboard() -> ClipItem? {
+    private struct PasteSnapshot {
+        let urls: [URL]
+        let png: Data?
+        let tiff: Data?
+        let text: String?
+    }
+
+    private func snapshotPasteboard() -> PasteSnapshot? {
+        let urls = (pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL]) ?? []
+        let png = pb.data(forType: .png)
+        let tiff = pb.data(forType: .tiff)
+        let text = pb.string(forType: .string)
+        if urls.isEmpty, png == nil, tiff == nil, (text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
+            return nil
+        }
+        return PasteSnapshot(urls: urls, png: png, tiff: tiff, text: text)
+    }
+
+    private func buildItem(from snap: PasteSnapshot) -> ClipItem? {
         let id = UUID()
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !urls.isEmpty {
-            return ClipItem(id: id, kind: .files, text: nil, imagePath: nil, filePaths: urls.map { $0.path }, timestamp: Date(), pinned: false)
+        if !snap.urls.isEmpty {
+            return ClipItem(id: id, kind: .files, text: nil, imagePath: nil, filePaths: snap.urls.map(\.path), timestamp: Date(), pinned: false)
         }
-        if let pngData = pb.data(forType: .png), !pngData.isEmpty {
-            let out = store.imageFileURL(for: id)
-            try? pngData.write(to: out)
-            return ClipItem(id: id, kind: .image, text: nil, imagePath: out.path, filePaths: nil, timestamp: Date(), pinned: false)
+        if let png = snap.png, !png.isEmpty, let path = store.writeImageData(png) {
+            return ClipItem(id: id, kind: .image, text: nil, imagePath: path, filePaths: nil, timestamp: Date(), pinned: false)
         }
-        if let tiffData = pb.data(forType: .tiff),
-           let image = NSImage(data: tiffData),
-           let rep = NSBitmapImageRep(data: image.tiffRepresentation ?? Data()),
-           let png = rep.representation(using: .png, properties: [:]) {
-            let out = store.imageFileURL(for: id)
-            try? png.write(to: out)
-            return ClipItem(id: id, kind: .image, text: nil, imagePath: out.path, filePaths: nil, timestamp: Date(), pinned: false)
+        if let tiff = snap.tiff, let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]),
+           let path = store.writeImageData(png) {
+            return ClipItem(id: id, kind: .image, text: nil, imagePath: path, filePaths: nil, timestamp: Date(), pinned: false)
         }
-        if let text = pb.string(forType: .string) {
+        if let text = snap.text {
             let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if clean.isEmpty { return nil }
             return ClipItem(id: id, kind: .text, text: clean, imagePath: nil, filePaths: nil, timestamp: Date(), pinned: false)
@@ -466,7 +600,7 @@ struct RowView: View {
                         .background(Color.accentColor.opacity(0.15), in: Capsule())
                 }
 
-                if item.kind == .image, let path = item.imagePath, let nsimg = NSImage(contentsOfFile: path) {
+                if item.kind == .image, let path = item.imagePath, let nsimg = ThumbCache.shared.thumbnail(path: path, maxPixel: 192) {
                     Image(nsImage: nsimg)
                         .resizable()
                         .scaledToFit()
@@ -634,12 +768,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.animates = true
         popover.contentSize = NSSize(width: 640, height: 460)
 
-        model.startWatching()
+        model.startWatching(interval: 1.2)
         setupStatusBar()
         setupHotkeyMonitor()
         setupKeyboardMonitor()
-        showPopover()
-        model.checkForUpdates()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+            self?.model.checkForUpdates()
+        }
     }
 
     private func setupStatusBar() {
@@ -694,8 +829,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePopoverFromStatusItem() { togglePopover() }
 
     private func togglePopover() {
-        if popover.isShown { popover.performClose(nil) }
-        else { showPopover() }
+        if popover.isShown {
+            popover.performClose(nil)
+            model.startWatching(interval: 1.2)
+        } else {
+            model.startWatching(interval: 0.4)
+            showPopover()
+        }
     }
 
     @objc private func showPopover() {
@@ -703,7 +843,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-        model.refresh()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
